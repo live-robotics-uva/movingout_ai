@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cluster Explorer (GitHub Pages Bundle)</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #f8fafc;
+      --border: #d1d5db;
+      --text: #111827;
+      --muted: #6b7280;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    .header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #fff;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+      height: calc(100vh - 48px);
+    }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-title {
+      font-weight: 600;
+      font-size: 14px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      background: #fff;
+    }
+    .panel-body {
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      height: 100%;
+      min-height: 0;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: white;
+      display: block;
+      min-height: 220px;
+    }
+    .canvas-wrap {
+      flex: 1;
+      min-height: 0;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      max-height: 90px;
+      overflow: auto;
+      padding: 2px;
+    }
+    .controls label {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #fff;
+      padding: 2px 6px;
+      font-size: 12px;
+      user-select: none;
+    }
+    .btns {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+      background: #fff;
+      cursor: pointer;
+    }
+    button:hover { background: #f3f4f6; }
+    #info {
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #fff;
+      padding: 8px;
+      min-height: 110px;
+      color: #111827;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    Self-contained cluster explorer • World range fixed: x,y in [-1.2, 1.2]
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <div class="panel-title">Start Points by Cluster (2D)</div>
+      <div class="panel-body">
+        <div class="canvas-wrap"><canvas id="scatterCanvas"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Cluster Segment Overlay</div>
+      <div class="panel-body">
+        <div class="btns">
+          <button id="showAllBtn">Show All</button>
+          <button id="clearAllBtn">Clear All</button>
+          <button id="focusHoveredBtn">Focus Hovered Cluster</button>
+        </div>
+        <div id="clusterControls" class="controls"></div>
+        <div class="canvas-wrap"><canvas id="overlayCanvas"></canvas></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Selected Segment</div>
+      <div class="panel-body">
+        <div class="canvas-wrap"><canvas id="segmentCanvas"></canvas></div>
+        <div id="info">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const WORLD_MIN = -1.2;
+    const WORLD_MAX = 1.2;
+    const PALETTE = [
+      '#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+      '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf',
+      '#393b79','#637939','#8c6d31','#843c39','#7b4173'
+    ];
+
+    const state = {
+      segments: [],
+      selectedClusters: new Set(),
+      clusterCount: 0,
+      hoveredSegmentId: null,
+      selectedSegmentId: null,
+      mapImage: null,
+      scatterPointsPx: []
+    };
+
+    const scatterCanvas = document.getElementById('scatterCanvas');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const segmentCanvas = document.getElementById('segmentCanvas');
+    const infoDiv = document.getElementById('info');
+    const controlsDiv = document.getElementById('clusterControls');
+
+    function resizeCanvasToDisplaySize(canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(100, Math.floor(rect.width * dpr));
+      const height = Math.max(100, Math.floor(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      return { width, height, dpr };
+    }
+
+    function getPlotRect(canvas) {
+      const { width, height } = resizeCanvasToDisplaySize(canvas);
+      const m = { l: 52, r: 14, t: 14, b: 38 };
+      const availW = Math.max(20, width - m.l - m.r);
+      const availH = Math.max(20, height - m.t - m.b);
+      const side = Math.min(availW, availH);
+      const x = m.l + (availW - side) / 2;
+      const y = m.t + (availH - side) / 2;
+      return { x, y, w: side, h: side, width, height };
+    }
+
+    function worldToPx(x, y, rect) {
+      const nx = (x - WORLD_MIN) / (WORLD_MAX - WORLD_MIN);
+      const ny = (y - WORLD_MIN) / (WORLD_MAX - WORLD_MIN);
+      return {
+        x: rect.x + nx * rect.w,
+        y: rect.y + (1 - ny) * rect.h
+      };
+    }
+
+    function clearAndDrawBase(ctx, canvas, title) {
+      const rect = getPlotRect(canvas);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      // Plot background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+
+      // Draw map with vertical flip so y-up world matches map coordinates
+      if (state.mapImage) {
+        ctx.save();
+        ctx.translate(rect.x, rect.y + rect.h);
+        ctx.scale(1, -1);
+        ctx.drawImage(state.mapImage, 0, 0, rect.w, rect.h);
+        ctx.restore();
+      }
+
+      // Border
+      ctx.strokeStyle = '#111827';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+
+      // Axes ticks: -1.2,-0.6,0,0.6,1.2
+      ctx.fillStyle = '#374151';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const ticks = [-1.2, -0.6, 0, 0.6, 1.2];
+      for (const tx of ticks) {
+        const p = worldToPx(tx, WORLD_MIN, rect);
+        ctx.beginPath();
+        ctx.moveTo(p.x, rect.y + rect.h);
+        ctx.lineTo(p.x, rect.y + rect.h + 4);
+        ctx.strokeStyle = '#374151';
+        ctx.stroke();
+        ctx.fillText(tx.toFixed(1), p.x, rect.y + rect.h + 6);
+      }
+
+      ctx.save();
+      ctx.translate(rect.x - 8, rect.y + rect.h / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText('y', 0, 0);
+      ctx.restore();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('x', rect.x + rect.w / 2, rect.y + rect.h + 34);
+
+      return rect;
+    }
+
+    function drawScatter() {
+      const ctx = scatterCanvas.getContext('2d');
+      const rect = clearAndDrawBase(ctx, scatterCanvas, 'scatter');
+
+      state.scatterPointsPx = [];
+      for (let i = 0; i < state.segments.length; i++) {
+        const seg = state.segments[i];
+        const c = seg.cluster;
+        const p = worldToPx(seg.start_xy[0], seg.start_xy[1], rect);
+        state.scatterPointsPx.push({ segmentId: i, x: p.x, y: p.y, cluster: c });
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = PALETTE[c % PALETTE.length];
+        ctx.globalAlpha = 0.82;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      if (state.hoveredSegmentId != null) {
+        const seg = state.segments[state.hoveredSegmentId];
+        const p = worldToPx(seg.start_xy[0], seg.start_xy[1], rect);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2);
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    function drawOverlay() {
+      const ctx = overlayCanvas.getContext('2d');
+      const rect = clearAndDrawBase(ctx, overlayCanvas, 'overlay');
+
+      const active = state.selectedClusters;
+      let drawn = 0;
+      for (const seg of state.segments) {
+        if (!active.has(seg.cluster)) continue;
+        const color = PALETTE[seg.cluster % PALETTE.length];
+
+        ctx.beginPath();
+        for (let i = 0; i < seg.path_xy.length; i++) {
+          const p = worldToPx(seg.path_xy[i][0], seg.path_xy[i][1], rect);
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.20;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        drawn += 1;
+      }
+
+      if (drawn === 0) {
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('No cluster selected', rect.x + rect.w / 2, rect.y + rect.h / 2);
+      }
+    }
+
+    function drawSelectedSegment() {
+      const ctx = segmentCanvas.getContext('2d');
+      const rect = clearAndDrawBase(ctx, segmentCanvas, 'segment');
+
+      if (state.selectedSegmentId == null) return;
+      const seg = state.segments[state.selectedSegmentId];
+      const color = PALETTE[seg.cluster % PALETTE.length];
+
+      ctx.beginPath();
+      for (let i = 0; i < seg.path_xy.length; i++) {
+        const p = worldToPx(seg.path_xy[i][0], seg.path_xy[i][1], rect);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      const p0 = worldToPx(seg.path_xy[0][0], seg.path_xy[0][1], rect);
+      ctx.beginPath();
+      ctx.arc(p0.x, p0.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = '#000';
+      ctx.fill();
+
+      infoDiv.textContent =
+        `segment_id: ${seg.segment_id}\n` +
+        `cluster: ${seg.cluster}\n` +
+        `behavior: ${seg.behavior_name}\n` +
+        `trajectory_index: ${seg.trajectory_index}\n` +
+        `start_step: ${seg.start_step}\n` +
+        `end_step: ${seg.end_step}\n` +
+        `start_xy: (${seg.start_xy[0].toFixed(3)}, ${seg.start_xy[1].toFixed(3)})`;
+    }
+
+    function renderAll() {
+      drawScatter();
+      drawOverlay();
+      drawSelectedSegment();
+    }
+
+    function buildClusterControls() {
+      controlsDiv.innerHTML = '';
+      const counts = new Array(state.clusterCount).fill(0);
+      for (const s of state.segments) counts[s.cluster] += 1;
+
+      for (let c = 0; c < state.clusterCount; c++) {
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.dataset.cluster = String(c);
+        cb.addEventListener('change', () => {
+          const k = Number(cb.dataset.cluster);
+          if (cb.checked) state.selectedClusters.add(k);
+          else state.selectedClusters.delete(k);
+          drawOverlay();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(` cluster_${c} (${counts[c]}) `));
+        controlsDiv.appendChild(label);
+      }
+    }
+
+    function syncControlChecks() {
+      const boxes = controlsDiv.querySelectorAll('input[type="checkbox"]');
+      boxes.forEach((b) => {
+        const c = Number(b.dataset.cluster);
+        b.checked = state.selectedClusters.has(c);
+      });
+    }
+
+    function pickNearestSegment(clientX, clientY) {
+      const rectDom = scatterCanvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const x = (clientX - rectDom.left) * dpr;
+      const y = (clientY - rectDom.top) * dpr;
+
+      let bestId = null;
+      let bestD2 = Infinity;
+      const threshold = 10 * dpr;
+      for (const p of state.scatterPointsPx) {
+        const dx = p.x - x;
+        const dy = p.y - y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          bestId = p.segmentId;
+        }
+      }
+      if (bestId != null && Math.sqrt(bestD2) <= threshold) return bestId;
+      return null;
+    }
+
+    function attachEvents() {
+      scatterCanvas.addEventListener('mousemove', (e) => {
+        const segId = pickNearestSegment(e.clientX, e.clientY);
+        if (segId !== state.hoveredSegmentId) {
+          state.hoveredSegmentId = segId;
+          if (segId != null) {
+            state.selectedSegmentId = segId;
+            drawSelectedSegment();
+          }
+          drawScatter();
+        }
+      });
+
+      scatterCanvas.addEventListener('click', (e) => {
+        const segId = pickNearestSegment(e.clientX, e.clientY);
+        if (segId != null) {
+          state.selectedSegmentId = segId;
+          drawSelectedSegment();
+          drawScatter();
+        }
+      });
+
+      document.getElementById('showAllBtn').addEventListener('click', () => {
+        state.selectedClusters.clear();
+        for (let c = 0; c < state.clusterCount; c++) state.selectedClusters.add(c);
+        syncControlChecks();
+        drawOverlay();
+      });
+
+      document.getElementById('clearAllBtn').addEventListener('click', () => {
+        state.selectedClusters.clear();
+        syncControlChecks();
+        drawOverlay();
+      });
+
+      document.getElementById('focusHoveredBtn').addEventListener('click', () => {
+        if (state.selectedSegmentId == null) return;
+        const c = state.segments[state.selectedSegmentId].cluster;
+        state.selectedClusters.clear();
+        state.selectedClusters.add(c);
+        syncControlChecks();
+        drawOverlay();
+      });
+
+      window.addEventListener('resize', () => renderAll());
+    }
+
+    async function loadData() {
+      const [jsonResp, mapImg] = await Promise.all([
+        fetch('./segment_cluster_data.json'),
+        new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = './map.png';
+        })
+      ]);
+
+      if (!jsonResp.ok) throw new Error('Failed to load segment_cluster_data.json');
+      const payload = await jsonResp.json();
+      const segments = payload.segments || [];
+
+      state.segments = segments;
+      state.mapImage = mapImg;
+      state.clusterCount = segments.reduce((m, s) => Math.max(m, s.cluster + 1), 0);
+      state.selectedClusters.clear();
+      for (let c = 0; c < state.clusterCount; c++) state.selectedClusters.add(c);
+
+      if (segments.length > 0) {
+        state.selectedSegmentId = 0;
+      }
+
+      buildClusterControls();
+      attachEvents();
+      renderAll();
+    }
+
+    loadData().catch((err) => {
+      console.error(err);
+      infoDiv.textContent = 'Failed to load local resources. Please ensure map.png and segment_cluster_data.json are in the same folder as index.html.';
+    });
+  </script>
+</body>
+</html>
