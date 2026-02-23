@@ -213,13 +213,9 @@
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-      // Draw map with vertical flip so y-up world matches map coordinates
+      // Draw map directly (no vertical flip)
       if (state.mapImage) {
-        ctx.save();
-        ctx.translate(rect.x, rect.y + rect.h);
-        ctx.scale(1, -1);
-        ctx.drawImage(state.mapImage, 0, 0, rect.w, rect.h);
-        ctx.restore();
+        ctx.drawImage(state.mapImage, rect.x, rect.y, rect.w, rect.h);
       }
 
       // Border
